@@ -1,0 +1,28 @@
+name: CD Deploy
+
+on:
+  repository_dispatch:
+    types:
+      - ci-success
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Show dispatch payload
+        run: |
+          echo "=== repository_dispatch payload ==="
+          echo "Triggered by : ${{ github.event.client_payload.workflow }}"
+          echo "Branch       : ${{ github.event.client_payload.branch }}"
+          echo "Commit SHA   : ${{ github.event.client_payload.sha }}"
+          echo "CI Run ID    : ${{ github.event.client_payload.run_id }}"
+
+      - name: Simulate deploy
+        run: |
+          echo "=== Deploy ==="
+          echo "Deploying ${{ github.event.client_payload.workflow }} build"
+          echo "Branch : ${{ github.event.client_payload.branch }}"
+          echo "SHA    : ${{ github.event.client_payload.sha }}"
+          echo "Deploy complete"
