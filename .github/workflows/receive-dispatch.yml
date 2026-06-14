@@ -1,0 +1,229 @@
+name: Receive Repository Dispatch
+
+on:
+  repository_dispatch:
+    types:
+      - ci-artifact-ready
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  download-artifact-from-ci-repo:
+    name: Download Artifact From CI Repo
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Show dispatch payload
+        run: |
+          echo "=================================================="
+          echo "  Repository Dispatch Received"
+          echo "=================================================="
+          echo "  Event type         : ${{ github.event.action }}"
+          echo "  App name           : ${{ github.event.client_payload.app_name }}"
+          echo "  Target environment : ${{ github.event.client_payload.target_environment }}"
+          echo "  Source repo        : ${{ github.event.client_payload.source_repo }}"
+          echo "  Release tag        : ${{ github.event.client_payload.release_tag }}"
+          echo "  Artifact pattern   : ${{ github.event.client_payload.artifact_pattern }}"
+          echo "  Triggered by       : ${{ github.event.client_payload.triggered_by }}"
+          echo "=================================================="
+
+      - name: Validate dispatch payload
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ github.event.client_payload.app_name }}"
+          SOURCE_REPO="${{ github.event.client_payload.source_repo }}"
+          RELEASE_TAG="${{ github.event.client_payload.release_tag }}"
+          ARTIFACT_PATTERN="${{ github.event.client_payload.artifact_pattern }}"
+          TARGET_ENVIRONMENT="${{ github.event.client_payload.target_environment }}"
+
+          if [ -z "${APP_NAME}" ]; then
+            echo "ERROR: app_name is missing."
+            exit 1
+          fi
+
+          if [ -z "${SOURCE_REPO}" ]; then
+            echo "ERROR: source_repo is missing."
+            exit 1
+          fi
+
+          if [ -z "${RELEASE_TAG}" ]; then
+            echo "ERROR: release_tag is missing."
+            exit 1
+          fi
+
+          if [ -z "${ARTIFACT_PATTERN}" ]; then
+            echo "ERROR: artifact_pattern is missing."
+            exit 1
+          fi
+
+          if [ -z "${TARGET_ENVIRONMENT}" ]; then
+            echo "ERROR: target_environment is missing."
+            exit 1
+          fi
+
+          case "${APP_NAME}" in
+            python)
+              EXPECTED_PATTERN="*.whl"
+              EXPECTED_PREFIX="python-1.0.0-${TARGET_ENVIRONMENT}-"
+              ;;
+            node)
+              EXPECTED_PATTERN="*.tgz"
+              EXPECTED_PREFIX="node-1.0.0-${TARGET_ENVIRONMENT}-"
+              ;;
+            *)
+              echo "ERROR: Unsupported app_name: ${APP_NAME}"
+              exit 1
+              ;;
+          esac
+
+          case "${TARGET_ENVIRONMENT}" in
+            dev|stage|prod)
+              echo "Supported environment: ${TARGET_ENVIRONMENT}"
+              ;;
+            *)
+              echo "ERROR: Unsupported target_environment: ${TARGET_ENVIRONMENT}"
+              exit 1
+              ;;
+          esac
+
+          if [ "${ARTIFACT_PATTERN}" != "${EXPECTED_PATTERN}" ]; then
+            echo "ERROR: artifact_pattern does not match app_name."
+            echo "Expected: ${EXPECTED_PATTERN}"
+            echo "Actual  : ${ARTIFACT_PATTERN}"
+            exit 1
+          fi
+
+          if [[ "${RELEASE_TAG}" != ${EXPECTED_PREFIX}* ]]; then
+            echo "ERROR: release_tag does not match app/environment."
+            echo "Expected prefix: ${EXPECTED_PREFIX}"
+            echo "Actual tag     : ${RELEASE_TAG}"
+            exit 1
+          fi
+
+          echo "Dispatch payload validation passed."
+
+      - name: Download artifact from CI repository GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_REPO_READ_TOKEN }}
+          APP_NAME: ${{ github.event.client_payload.app_name }}
+          SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
+          RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
+          ARTIFACT_PATTERN: ${{ github.event.client_payload.artifact_pattern }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "ERROR: SOURCE_REPO_READ_TOKEN secret is missing in Repo 2."
+            exit 1
+          fi
+
+          mkdir -p "downloaded/${APP_NAME}"
+
+          echo "=================================================="
+          echo "  Downloading Artifact From CI Repository"
+          echo "=================================================="
+          echo "  Source repo      : ${SOURCE_REPO}"
+          echo "  Release tag      : ${RELEASE_TAG}"
+          echo "  Artifact pattern : ${ARTIFACT_PATTERN}"
+          echo "  Destination      : downloaded/${APP_NAME}/"
+          echo "=================================================="
+
+          gh release view "${RELEASE_TAG}" \
+            --repo "${SOURCE_REPO}"
+
+          gh release download "${RELEASE_TAG}" \
+            --repo "${SOURCE_REPO}" \
+            --pattern "${ARTIFACT_PATTERN}" \
+            --dir "downloaded/${APP_NAME}/"
+
+          gh release download "${RELEASE_TAG}" \
+            --repo "${SOURCE_REPO}" \
+            --pattern "SHA256SUMS.txt" \
+            --dir "downloaded/${APP_NAME}/" || true
+
+          echo "Downloaded files:"
+          ls -lh "downloaded/${APP_NAME}/"
+
+      - name: Verify downloaded artifact
+        env:
+          APP_NAME: ${{ github.event.client_payload.app_name }}
+        run: |
+          set -euo pipefail
+
+          echo "=================================================="
+          echo "  Artifact Verification"
+          echo "=================================================="
+
+          ls -lh "downloaded/${APP_NAME}/"
+
+          case "${APP_NAME}" in
+            python)
+              if ! ls downloaded/${APP_NAME}/*.whl >/dev/null 2>&1; then
+                echo "ERROR: Python .whl artifact not found."
+                exit 1
+              fi
+
+              echo "Python artifact:"
+              ls downloaded/${APP_NAME}/*.whl
+
+              echo "Local checksum:"
+              sha256sum downloaded/${APP_NAME}/*.whl
+              ;;
+            node)
+              if ! ls downloaded/${APP_NAME}/*.tgz >/dev/null 2>&1; then
+                echo "ERROR: Node .tgz artifact not found."
+                exit 1
+              fi
+
+              echo "Node artifact:"
+              ls downloaded/${APP_NAME}/*.tgz
+
+              echo "Local checksum:"
+              sha256sum downloaded/${APP_NAME}/*.tgz
+              ;;
+            *)
+              echo "ERROR: Unsupported app_name: ${APP_NAME}"
+              exit 1
+              ;;
+          esac
+
+          if [ -f "downloaded/${APP_NAME}/SHA256SUMS.txt" ]; then
+            echo ""
+            echo "Verifying SHA256SUMS.txt:"
+            cd "downloaded/${APP_NAME}"
+            sha256sum -c SHA256SUMS.txt
+          else
+            echo ""
+            echo "No SHA256SUMS.txt found. Local checksum was generated only for visibility."
+          fi
+
+          echo "=================================================="
+          echo "  Artifact downloaded and verified successfully"
+          echo "  No rebuild performed in CD repository"
+          echo "=================================================="
+
+      - name: Write dispatch summary
+        run: |
+          {
+            echo "## Repository Dispatch Artifact Download"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| App | ${{ github.event.client_payload.app_name }} |"
+            echo "| Target environment | ${{ github.event.client_payload.target_environment }} |"
+            echo "| Source repo | ${{ github.event.client_payload.source_repo }} |"
+            echo "| Release tag | ${{ github.event.client_payload.release_tag }} |"
+            echo "| Artifact pattern | ${{ github.event.client_payload.artifact_pattern }} |"
+            echo "| Triggered by | ${{ github.event.client_payload.triggered_by }} |"
+            echo ""
+            echo "Artifact was downloaded from the CI repository GitHub Release."
+            echo ""
+            echo "No rebuild was performed in the CD repository."
+          } >> "$GITHUB_STEP_SUMMARY"
