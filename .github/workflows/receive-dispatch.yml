@@ -1,9 +1,9 @@
-name: Receive Repository Dispatch
+name: Receive Dispatch Build
 
 on:
   repository_dispatch:
     types:
-      - ci-artifact-ready
+      - build-requested
 
 permissions:
   contents: read
@@ -13,24 +13,24 @@ defaults:
     shell: bash
 
 jobs:
-  download-artifact-from-ci-repo:
-    name: Download Artifact From CI Repo
+  build-selected-app:
+    name: Build Selected App
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
-      - name: Show dispatch payload
+      - name: Show repository dispatch payload
         run: |
           echo "=================================================="
           echo "  Repository Dispatch Received"
           echo "=================================================="
-          echo "  Event type         : ${{ github.event.action }}"
-          echo "  App name           : ${{ github.event.client_payload.app_name }}"
-          echo "  Target environment : ${{ github.event.client_payload.target_environment }}"
-          echo "  Source repo        : ${{ github.event.client_payload.source_repo }}"
-          echo "  Release tag        : ${{ github.event.client_payload.release_tag }}"
-          echo "  Artifact pattern   : ${{ github.event.client_payload.artifact_pattern }}"
-          echo "  Triggered by       : ${{ github.event.client_payload.triggered_by }}"
+          echo "  Event type    : ${{ github.event.action }}"
+          echo "  App name      : ${{ github.event.client_payload.app_name }}"
+          echo "  Source repo   : ${{ github.event.client_payload.source_repo }}"
+          echo "  Source ref    : ${{ github.event.client_payload.source_ref }}"
+          echo "  Source SHA    : ${{ github.event.client_payload.source_sha }}"
+          echo "  Artifact type : ${{ github.event.client_payload.artifact_type }}"
+          echo "  Triggered by  : ${{ github.event.client_payload.triggered_by }}"
           echo "=================================================="
 
       - name: Validate dispatch payload
@@ -39,9 +39,9 @@ jobs:
 
           APP_NAME="${{ github.event.client_payload.app_name }}"
           SOURCE_REPO="${{ github.event.client_payload.source_repo }}"
-          RELEASE_TAG="${{ github.event.client_payload.release_tag }}"
-          ARTIFACT_PATTERN="${{ github.event.client_payload.artifact_pattern }}"
-          TARGET_ENVIRONMENT="${{ github.event.client_payload.target_environment }}"
+          SOURCE_REF="${{ github.event.client_payload.source_ref }}"
+          SOURCE_SHA="${{ github.event.client_payload.source_sha }}"
+          ARTIFACT_TYPE="${{ github.event.client_payload.artifact_type }}"
 
           if [ -z "${APP_NAME}" ]; then
             echo "ERROR: app_name is missing."
@@ -53,177 +53,169 @@ jobs:
             exit 1
           fi
 
-          if [ -z "${RELEASE_TAG}" ]; then
-            echo "ERROR: release_tag is missing."
+          if [ -z "${SOURCE_REF}" ]; then
+            echo "ERROR: source_ref is missing."
             exit 1
           fi
 
-          if [ -z "${ARTIFACT_PATTERN}" ]; then
-            echo "ERROR: artifact_pattern is missing."
+          if [ -z "${SOURCE_SHA}" ]; then
+            echo "ERROR: source_sha is missing."
             exit 1
           fi
 
-          if [ -z "${TARGET_ENVIRONMENT}" ]; then
-            echo "ERROR: target_environment is missing."
+          if [ -z "${ARTIFACT_TYPE}" ]; then
+            echo "ERROR: artifact_type is missing."
             exit 1
           fi
 
           case "${APP_NAME}" in
-            python)
-              EXPECTED_PATTERN="*.whl"
-              EXPECTED_PREFIX="python-1.0.0-${TARGET_ENVIRONMENT}-"
-              ;;
             node)
-              EXPECTED_PATTERN="*.tgz"
-              EXPECTED_PREFIX="node-1.0.0-${TARGET_ENVIRONMENT}-"
+              if [ "${ARTIFACT_TYPE}" != "tgz" ]; then
+                echo "ERROR: Node artifact_type must be tgz."
+                exit 1
+              fi
+              ;;
+            python)
+              if [ "${ARTIFACT_TYPE}" != "whl" ]; then
+                echo "ERROR: Python artifact_type must be whl."
+                exit 1
+              fi
               ;;
             *)
               echo "ERROR: Unsupported app_name: ${APP_NAME}"
               exit 1
               ;;
           esac
-
-          case "${TARGET_ENVIRONMENT}" in
-            dev|stage|prod)
-              echo "Supported environment: ${TARGET_ENVIRONMENT}"
-              ;;
-            *)
-              echo "ERROR: Unsupported target_environment: ${TARGET_ENVIRONMENT}"
-              exit 1
-              ;;
-          esac
-
-          if [ "${ARTIFACT_PATTERN}" != "${EXPECTED_PATTERN}" ]; then
-            echo "ERROR: artifact_pattern does not match app_name."
-            echo "Expected: ${EXPECTED_PATTERN}"
-            echo "Actual  : ${ARTIFACT_PATTERN}"
-            exit 1
-          fi
-
-          if [[ "${RELEASE_TAG}" != ${EXPECTED_PREFIX}* ]]; then
-            echo "ERROR: release_tag does not match app/environment."
-            echo "Expected prefix: ${EXPECTED_PREFIX}"
-            echo "Actual tag     : ${RELEASE_TAG}"
-            exit 1
-          fi
 
           echo "Dispatch payload validation passed."
 
-      - name: Download artifact from CI repository GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.SOURCE_REPO_READ_TOKEN }}
-          APP_NAME: ${{ github.event.client_payload.app_name }}
-          SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
-          RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
-          ARTIFACT_PATTERN: ${{ github.event.client_payload.artifact_pattern }}
+      - name: Checkout source repository at exact SHA
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.source_repo }}
+          ref: ${{ github.event.client_payload.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_READ_TOKEN }}
+          path: source
+
+      - name: Show checked out source
+        run: |
+          echo "Checked out source repository:"
+          echo "Repository : ${{ github.event.client_payload.source_repo }}"
+          echo "Ref        : ${{ github.event.client_payload.source_ref }}"
+          echo "SHA        : ${{ github.event.client_payload.source_sha }}"
+          echo ""
+          echo "Top-level files:"
+          ls -lh source
+
+      # ------------------------------------------------------------
+      # Build Node.js app
+      # ------------------------------------------------------------
+
+      - name: Set up Node.js
+        if: ${{ github.event.client_payload.app_name == 'node' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Show Node and npm versions
+        if: ${{ github.event.client_payload.app_name == 'node' }}
+        run: |
+          node --version
+          npm --version
+
+      - name: Build Node artifact
+        if: ${{ github.event.client_payload.app_name == 'node' }}
+        working-directory: source/apps/node
         run: |
           set -euo pipefail
 
-          if [ -z "${GH_TOKEN}" ]; then
-            echo "ERROR: SOURCE_REPO_READ_TOKEN secret is missing in Repo 2."
+          npm ci
+          npm run build
+
+          echo "Node build output:"
+          ls -lh dist/
+
+          if ! ls dist/*.tgz >/dev/null 2>&1; then
+            echo "ERROR: Node .tgz artifact was not generated."
             exit 1
           fi
 
-          mkdir -p "downloaded/${APP_NAME}"
+          cd dist
+          sha256sum *.tgz > SHA256SUMS.txt
 
-          echo "=================================================="
-          echo "  Downloading Artifact From CI Repository"
-          echo "=================================================="
-          echo "  Source repo      : ${SOURCE_REPO}"
-          echo "  Release tag      : ${RELEASE_TAG}"
-          echo "  Artifact pattern : ${ARTIFACT_PATTERN}"
-          echo "  Destination      : downloaded/${APP_NAME}/"
-          echo "=================================================="
+          echo "Generated checksum:"
+          cat SHA256SUMS.txt
 
-          gh release view "${RELEASE_TAG}" \
-            --repo "${SOURCE_REPO}"
+      - name: Upload Node artifact
+        if: ${{ github.event.client_payload.app_name == 'node' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-build-${{ github.event.client_payload.source_sha }}
+          path: |
+            source/apps/node/dist/*.tgz
+            source/apps/node/dist/SHA256SUMS.txt
+          retention-days: 7
+          if-no-files-found: error
 
-          gh release download "${RELEASE_TAG}" \
-            --repo "${SOURCE_REPO}" \
-            --pattern "${ARTIFACT_PATTERN}" \
-            --dir "downloaded/${APP_NAME}/"
+      # ------------------------------------------------------------
+      # Build Python app
+      # ------------------------------------------------------------
 
-          gh release download "${RELEASE_TAG}" \
-            --repo "${SOURCE_REPO}" \
-            --pattern "SHA256SUMS.txt" \
-            --dir "downloaded/${APP_NAME}/" || true
+      - name: Set up Python
+        if: ${{ github.event.client_payload.app_name == 'python' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-          echo "Downloaded files:"
-          ls -lh "downloaded/${APP_NAME}/"
-
-      - name: Verify downloaded artifact
-        env:
-          APP_NAME: ${{ github.event.client_payload.app_name }}
+      - name: Build Python artifact
+        if: ${{ github.event.client_payload.app_name == 'python' }}
+        working-directory: source/apps/python
         run: |
           set -euo pipefail
 
-          echo "=================================================="
-          echo "  Artifact Verification"
-          echo "=================================================="
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
-          ls -lh "downloaded/${APP_NAME}/"
+          python -m build
 
-          case "${APP_NAME}" in
-            python)
-              if ! ls downloaded/${APP_NAME}/*.whl >/dev/null 2>&1; then
-                echo "ERROR: Python .whl artifact not found."
-                exit 1
-              fi
+          echo "Python build output:"
+          ls -lh dist/
 
-              echo "Python artifact:"
-              ls downloaded/${APP_NAME}/*.whl
-
-              echo "Local checksum:"
-              sha256sum downloaded/${APP_NAME}/*.whl
-              ;;
-            node)
-              if ! ls downloaded/${APP_NAME}/*.tgz >/dev/null 2>&1; then
-                echo "ERROR: Node .tgz artifact not found."
-                exit 1
-              fi
-
-              echo "Node artifact:"
-              ls downloaded/${APP_NAME}/*.tgz
-
-              echo "Local checksum:"
-              sha256sum downloaded/${APP_NAME}/*.tgz
-              ;;
-            *)
-              echo "ERROR: Unsupported app_name: ${APP_NAME}"
-              exit 1
-              ;;
-          esac
-
-          if [ -f "downloaded/${APP_NAME}/SHA256SUMS.txt" ]; then
-            echo ""
-            echo "Verifying SHA256SUMS.txt:"
-            cd "downloaded/${APP_NAME}"
-            sha256sum -c SHA256SUMS.txt
-          else
-            echo ""
-            echo "No SHA256SUMS.txt found. Local checksum was generated only for visibility."
+          if ! ls dist/*.whl >/dev/null 2>&1; then
+            echo "ERROR: Python .whl artifact was not generated."
+            exit 1
           fi
 
-          echo "=================================================="
-          echo "  Artifact downloaded and verified successfully"
-          echo "  No rebuild performed in CD repository"
-          echo "=================================================="
+          cd dist
+          sha256sum *.whl > SHA256SUMS.txt
 
-      - name: Write dispatch summary
+          echo "Generated checksum:"
+          cat SHA256SUMS.txt
+
+      - name: Upload Python artifact
+        if: ${{ github.event.client_payload.app_name == 'python' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-build-${{ github.event.client_payload.source_sha }}
+          path: |
+            source/apps/python/dist/*.whl
+            source/apps/python/dist/SHA256SUMS.txt
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Write build summary
         run: |
           {
-            echo "## Repository Dispatch Artifact Download"
+            echo "## Repository Dispatch Build Summary"
             echo ""
             echo "| Field | Value |"
             echo "|---|---|"
             echo "| App | ${{ github.event.client_payload.app_name }} |"
-            echo "| Target environment | ${{ github.event.client_payload.target_environment }} |"
             echo "| Source repo | ${{ github.event.client_payload.source_repo }} |"
-            echo "| Release tag | ${{ github.event.client_payload.release_tag }} |"
-            echo "| Artifact pattern | ${{ github.event.client_payload.artifact_pattern }} |"
+            echo "| Source ref | ${{ github.event.client_payload.source_ref }} |"
+            echo "| Source SHA | ${{ github.event.client_payload.source_sha }} |"
             echo "| Triggered by | ${{ github.event.client_payload.triggered_by }} |"
             echo ""
-            echo "Artifact was downloaded from the CI repository GitHub Release."
-            echo ""
-            echo "No rebuild was performed in the CD repository."
+            echo "Repo 2 checked out Repo 1 at the exact source SHA and built the selected app artifact."
           } >> "$GITHUB_STEP_SUMMARY"
