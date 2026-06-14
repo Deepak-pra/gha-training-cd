@@ -94,7 +94,6 @@ jobs:
         with:
           repository: ${{ github.event.client_payload.source_repo }}
           ref: ${{ github.event.client_payload.source_sha }}
-          token: ${{ secrets.SOURCE_REPO_READ_TOKEN }}
           path: source
 
       - name: Show checked out source
@@ -129,7 +128,10 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Installing Node dependencies using npm ci..."
           npm ci
+
+          echo "Building Node package..."
           npm run build
 
           echo "Node build output:"
@@ -167,16 +169,30 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Validate Python pyproject.toml
+        if: ${{ github.event.client_payload.app_name == 'python' }}
+        working-directory: source/apps/python
+        run: |
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          tomllib.loads(Path("pyproject.toml").read_text())
+          print("pyproject.toml is valid TOML")
+          PY
+
       - name: Build Python artifact
         if: ${{ github.event.client_payload.app_name == 'python' }}
         working-directory: source/apps/python
         run: |
           set -euo pipefail
 
+          echo "Installing Python dependencies..."
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
+          echo "Building Python wheel..."
           python -m build
 
           echo "Python build output:"
@@ -215,6 +231,7 @@ jobs:
             echo "| Source repo | ${{ github.event.client_payload.source_repo }} |"
             echo "| Source ref | ${{ github.event.client_payload.source_ref }} |"
             echo "| Source SHA | ${{ github.event.client_payload.source_sha }} |"
+            echo "| Artifact type | ${{ github.event.client_payload.artifact_type }} |"
             echo "| Triggered by | ${{ github.event.client_payload.triggered_by }} |"
             echo ""
             echo "Repo 2 checked out Repo 1 at the exact source SHA and built the selected app artifact."
